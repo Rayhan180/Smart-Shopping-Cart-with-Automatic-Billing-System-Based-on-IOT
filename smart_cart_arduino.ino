@@ -1,123 +1,89 @@
-#include <WiFi.h>
-#include <HTTPClient.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SoftwareSerial.h>
 
-const char *WIFI_SSID = "Rayhan_HomeNet";
-const char *WIFI_PASS = "Ryh#47kLm92!";
+#define RFID_SS_PIN 10
+#define RFID_RST_PIN 9
 
-const char *SERVER_URL = "http://192.168.1.120:8080/rfid";
+#define ESP32_RX_PIN 2
+#define ESP32_TX_PIN 3
 
-HardwareSerial &cartUart = Serial2;
-const int UART_RX_PIN = 16;
-const int UART_TX_PIN = 17;
-const int UART_BAUD  = 9600;
+MFRC522 rfid(RFID_SS_PIN, RFID_RST_PIN);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+SoftwareSerial espUart(ESP32_RX_PIN, ESP32_TX_PIN);
 
-// Connect ESP32 to Wi-Fi network
-void connectWiFi()
+// Convert UID bytes into a readable HEX string
+String uidToHexString(MFRC522::Uid *uid)
 {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  String result = "";
 
-  unsigned long startAttempt = millis();
-
-  while (WiFi.status() != WL_CONNECTED)
+  for (byte i = 0; i < uid->size; i++)
   {
-    delay(500);
-
-    // simple timeout protection
-    if (millis() - startAttempt > 20000)
+    if (uid->uidByte[i] < 0x10)
     {
-      startAttempt = millis();
-      WiFi.disconnect();
-      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      result += "0";
     }
+    result += String(uid->uidByte[i], HEX);
   }
+
+  result.toUpperCase();
+  return result;
 }
 
-// Send UID JSON to backend
-bool sendUidToServer(const String &uid)
-{
-  if (WiFi.status() != WL_CONNECTED)
-  {
-    connectWiFi();
-  }
-
-  HTTPClient http;
-  http.begin(SERVER_URL);
-  http.addHeader("Content-Type", "application/json");
-
-  String payload = "{\"uid\":\"" + uid + "\"}";
-  int httpCode = http.POST(payload);
-  http.end();
-
-  return (httpCode > 0);
-}
-
-// Parse UART frame like <UID:XXXXXXXX>
-bool parseUidFrame(const String &line, String &uidOut)
-{
-  int start = line.indexOf("<UID:");
-  int end   = line.indexOf(">");
-
-  if (start == -1 || end == -1)
-  {
-    return false;
-  }
-
-  int uidStart = start + 5;
-  if (uidStart >= end)
-  {
-    return false;
-  }
-
-  uidOut = line.substring(uidStart, end);
-  uidOut.trim();
-
-  return (uidOut.length() > 0);
-}
-
-// ESP32 setup
+// Arduino initialization
 void setup()
 {
   Serial.begin(115200);
-  cartUart.begin(UART_BAUD, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  espUart.begin(9600);
 
-  connectWiFi();
+  SPI.begin();
+  rfid.PCD_Init();
 
-  Serial.println("Rayhan Cart Gateway Ready");
+  lcd.init();
+  lcd.backlight();
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Smart Cart");
+  lcd.setCursor(0, 1);
+  lcd.print("Scan RFID...");
 }
 
-// Main processing loop
+// Main execution loop
 void loop()
 {
-  if (cartUart.available())
+  if (!rfid.PICC_IsNewCardPresent())
   {
-    String line = cartUart.readStringUntil('\n');
-    line.trim();
-
-    Serial.print("UART RX: ");
-    Serial.println(line);
-
-    String uid;
-
-    if (parseUidFrame(line, uid))
-    {
-      Serial.print("UID Parsed: ");
-      Serial.println(uid);
-
-      bool ok = sendUidToServer(uid);
-
-      if (ok)
-      {
-        Serial.println("POST success");
-      }
-      else
-      {
-        Serial.println("POST failed");
-      }
-    }
-    else
-    {
-      Serial.println("Invalid frame");
-    }
+    return;
   }
+
+  if (!rfid.PICC_ReadCardSerial())
+  {
+    return;
+  }
+
+  String uidStr = uidToHexString(&rfid.uid);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("UID:");
+  lcd.setCursor(0, 1);
+  lcd.print(uidStr);
+
+  String msg = "<UID:" + uidStr + ">";
+  espUart.println(msg);
+
+  Serial.print("Sent to ESP32: ");
+  Serial.println(msg);
+
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
+
+  delay(1200);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Scan RFID...");
 }
